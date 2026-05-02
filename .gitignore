@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Mac
+*/.DS_Store
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Temporary files
+*~
+*.swp
+
+# Model output
+*.nc
+
+# Old figures
+figs/deprecated
