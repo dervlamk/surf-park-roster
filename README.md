@@ -79,7 +79,7 @@ Each row shows the role, required certifications, full-time/part-time status, ho
 
 ### Sheet 4 — LG Rotation Template
 
-Explains how the 30-minute lifeguard rotation works. This template applies to all shift types on all days.
+Explains how the 60-minute lifeguard rotation works. This template applies to all shift types on all days.
 
 **The 8 stations (in rotation order):**
 
@@ -94,19 +94,19 @@ Explains how the 30-minute lifeguard rotation works. This template applies to al
 | FAR | First Aid Room |
 | BR | Board Rental |
 
-Each guard starts at a different position in this cycle, so all 8 posts are covered simultaneously at any given moment. Every 30 minutes, everyone rotates one step forward.
+Each guard starts at a different position in this cycle, so all 8 posts are covered simultaneously at any given moment. Every 60 minutes, everyone rotates one step forward.
 
 **Guard-1 and Guard-2 start at reef stations (RR and LR)** — these must be surfer-qualified guards.
 
 **Meal breaks** are staggered: Guard-1 takes their 30-minute unpaid meal break first, then Guard-2, and so on. The Relief Guard covers the vacated post during each meal window.
 
-**Rest breaks** (10 minutes, paid) are taken within the 30-minute rotation slot at approximately the 3.5-hour mark — guards step away briefly while still being counted in the rotation.
+**Rest breaks** (10 minutes, paid) are taken within the 60-minute rotation slot at approximately the 3.5-hour mark — guards step away briefly while still being counted in the rotation.
 
 The break schedule table at the bottom of the sheet shows the specific rest break times and meal windows for each of the 8 guards plus the Relief Guard.
 
 ---
 
-### Sheet 5 — Mon–Thu Duty Roster
+### Sheet 5 — Duty Roster
 
 The full-day duty roster for Monday through Thursday.
 
