@@ -1,53 +1,38 @@
 """
 Minimum staffing solver — Layer 2.
 
-Consumes list[Slot] from roster/rotation.py (the demand schedule) and finds
-the fewest shift-workers needed to cover every 30-min slot, subject to:
-  - A minimum shift length (LG_BASE_SHIFT_HRS from config)
+Consumes list[Slot] from roster/rotation.py and finds the fewest
+shift-workers needed to cover every 30-min slot, subject to:
+  - Maximum shift length (LG_MAX_SHIFT_HRS from config)
   - California labor law break requirements
-  - Cert constraints (reef_eligible for RG slots, coach_eligible for coach slots)
-  - Dual-role optimisation: reef LGs with WSI coach cert cover AC slots for free
+  - Exactly 30-minute handover overlap between consecutive same-role shifts
+  - 2 fixed Advanced Coach shifts covering the entire LG operational window
 
-The solver works per-day (not jointly across the week).  Weekly hour totals
-are checked as a post-step sum in __main__.py.
+Advanced Coaches are separate headcount from Lifeguards.  A dual-role
+person (reef-eligible + WSI) may cover an AC shift ADJACENT to — never
+concurrent with — their LG shift.
 
-OUTPUT
-  StaffingResult per day → rendered by solver/render_staffing.py into
-  outputs/staffing_v0.xlsx with one sheet per day + a weekly summary.
-
-ROLE TYPES
-  shore      SG* + SF* prefix slots  (no surf cert needed)
-  reef_only  RG* + RF* slots where no AC duty exists simultaneously
-  reef_dual  RG* + RF* slots that also satisfy AC demand (needs WSI)
-  bay_coach  BC* slots (WSI needed; can also be filled by LGs with WSI)
+The solver works per-day.  Output is DayStaffingResult, rendered by
+solver/render_staffing.py into outputs/staffing_v0.xlsx.
 """
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from collections import defaultdict
 
 from ortools.sat.python import cp_model
 
 from roster.rotation import Slot
-
 import config_v2 as cfg
 
 
 # ── Demand extraction ─────────────────────────────────────────────────────────
 
 def _demand_vectors(slots: list[Slot]) -> dict[str, list[int]]:
-    """
-    For each role category return a list[int] of length len(slots) where
-    entry t is the number of that-role workers needed at slot t.
-
-    Workers are counted as "needed" whenever their assignment is not OFF.
-    """
     n = len(slots)
     d: dict[str, list[int]] = {
         "shore":     [0] * n,
         "reef":      [0] * n,
-        "adv_coach": [0] * n,
         "bay_coach": [0] * n,
     }
     for t, s in enumerate(slots):
@@ -58,8 +43,6 @@ def _demand_vectors(slots: list[Slot]) -> dict[str, list[int]]:
                 d["shore"][t] += 1
             elif sid.startswith(("RG", "RF")):
                 d["reef"][t] += 1
-            elif sid.startswith("AC"):
-                d["adv_coach"][t] += 1
             elif sid.startswith("BC"):
                 d["bay_coach"][t] += 1
     return d
@@ -67,18 +50,14 @@ def _demand_vectors(slots: list[Slot]) -> dict[str, list[int]]:
 
 # ── Shift window generation ───────────────────────────────────────────────────
 
-def _shift_windows(
-    demand: list[int],
-    base_slots: int,
-    max_slots: int,
-) -> list[tuple[int, int]]:
+def _shift_windows(demand: list[int], max_slots: int) -> list[tuple[int, int]]:
     """
-    Generate feasible shift windows (start_slot, end_slot) where:
-      - demand[t] > 0 for at least one t within the window
-      - base_slots ≤ window_length ≤ max_slots
-      - Windows are aligned to whole-hour boundaries (every 2 slots)
-
-    Returns a de-duped sorted list of (start, end) tuples.
+    Generate feasible (start, end) windows where:
+      - start and end are at 30-min granularity (1-slot steps)
+      - 2 ≤ length ≤ max_slots (1-hour floor, configurable ceiling)
+      - At least one demand[t] > 0 within the window
+    Starting from the first active demand slot avoids phantom shifts
+    beginning before the LG arrival time.
     """
     active = [t for t, v in enumerate(demand) if v > 0]
     if not active:
@@ -86,12 +65,11 @@ def _shift_windows(
     first, last = active[0], active[-1]
 
     windows = set()
-    for start in range(max(0, first - 1), last + 1, 2):   # step by 1 hour
-        for length in range(base_slots, max_slots + 1, 2): # step by 1 hour
+    for start in range(first, last + 1):           # any 30-min boundary
+        for length in range(2, max_slots + 1):     # 1-slot (30-min) increments
             end = start + length
             if end > len(demand):
                 break
-            # Only include windows that overlap at least one active slot.
             if any(demand[t] > 0 for t in range(start, end)):
                 windows.add((start, end))
     return sorted(windows)
@@ -100,18 +78,17 @@ def _shift_windows(
 # ── CA break helpers ──────────────────────────────────────────────────────────
 
 def _break_note(shift_slots: int) -> str | None:
-    """Return a CA-law break note for a given shift length (in 30-min slots)."""
     hours = shift_slots * 0.5
     br = cfg.BREAK_RULES
     if hours > br["meal_trigger_hrs"]:
         rest_count = math.floor(hours / br["rest_interval_hrs"])
         return (
-            f"{hours:.1f}h shift → 1 × {br['meal_duration_min']}-min unpaid meal "
-            f"+ {rest_count} × {br['rest_duration_min']}-min paid rest"
+            f"{hours:.1f}h → 1×{br['meal_duration_min']}-min meal (unpaid) "
+            f"+ {rest_count}×{br['rest_duration_min']}-min rest (paid)"
         )
     if hours >= br["rest_interval_hrs"]:
         rest_count = math.floor(hours / br["rest_interval_hrs"])
-        return f"{hours:.1f}h shift → {rest_count} × {br['rest_duration_min']}-min paid rest"
+        return f"{hours:.1f}h → {rest_count}×{br['rest_duration_min']}-min paid rest"
     return None
 
 
@@ -123,11 +100,6 @@ def _solve_cover(
     label: str,
     timeout: int = 30,
 ) -> dict[tuple[int, int], int]:
-    """
-    Minimum-workers shift-cover for one role category.
-
-    Returns {(start, end): n_workers} for windows with n_workers > 0.
-    """
     if not windows or max(demand) == 0:
         return {}
 
@@ -157,31 +129,106 @@ def _solve_cover(
 @dataclass
 class ShiftBlock:
     role: str
-    start: str   # "HH:MM"
-    end: str     # "HH:MM" exclusive
+    start: str          # "HH:MM" display
+    end: str            # "HH:MM" display (exclusive = start of next slot after last covered)
     workers: int
     shift_hrs: float
     ca_note: str | None
+    _start_slot: int = field(default=0, repr=False)
+    _end_slot: int   = field(default=0, repr=False)
+
+
+@dataclass
+class PersonTypeBreakdown:
+    """One row in the FT/PT breakdown table."""
+    role: str
+    shift_start: str
+    shift_end: str
+    shift_hrs: float
+    n_workers: int
+    is_ft_eligible: bool   # shift_hrs >= cfg.FT_SHIFT_THRESHOLD
 
 
 @dataclass
 class DayStaffingResult:
     day: str
-    open_time: str
-    close_time: str
+    park_open_time: str      # from xlsx — park gates open
+    park_close_time: str     # from xlsx — park gates close
+    lg_start_time: str       # LG arrival (30 min before first wave)
+    lg_end_time: str         # last wave end = when LG shifts stop
     shifts: list[ShiftBlock]
-    # Headcount summaries
-    shore_total: int        # total shore-LG person-shifts
-    reef_total: int         # total reef-LG person-shifts (pure + dual)
-    dual_role_total: int    # reef workers that also cover AC slots (subset of reef_total)
-    bay_coach_total: int    # bay-coach person-shifts
-    adv_coach_covered: bool # True = AC demand fully met by dual-role reef workers
-    # Minimum unique persons (lower bounds)
-    min_persons_all_pt: int     # every worker does exactly one shift
-    min_persons_with_ft: int    # FT workers do two adjacent shifts (rough estimate)
-    # Savings
-    dual_role_saved: int    # advanced-coach hires avoided by dual-role reef workers
+    shore_total: int
+    reef_total: int
+    ac_total: int            # always 2 (1 coach per shift × 2 shifts)
+    bay_coach_total: int
+    person_breakdown: list[PersonTypeBreakdown]
+    min_persons_all_pt: int
+    ft_eligible_workers: int
+    pt_only_workers: int
     notes: list[str] = field(default_factory=list)
+
+
+# ── Handover post-processing ──────────────────────────────────────────────────
+
+def _apply_handover(blocks: list[ShiftBlock], slot_to_hhmm) -> None:
+    """
+    Enforce exactly 30-min handover between consecutive same-role shifts:
+      shift_1.end = shift_2.start + 30 min
+
+    If the solver produces more overlap (efficiency-driven), the outgoing
+    shift is trimmed.  If shifts are exactly adjacent, the outgoing shift
+    is extended by one slot.  Coverage is maintained in both cases because
+    shift_2 always covers from shift_2.start onwards.
+    """
+    by_role: dict[str, list[ShiftBlock]] = {}
+    for b in blocks:
+        by_role.setdefault(b.role, []).append(b)
+
+    for role_blocks in by_role.values():
+        role_blocks.sort(key=lambda b: b._start_slot)
+        for i in range(len(role_blocks) - 1):
+            b1 = role_blocks[i]
+            b2 = role_blocks[i + 1]
+            handover_end = b2._start_slot + 1   # shift 1 ends exactly 1 slot past shift 2 start
+            if b1._end_slot != handover_end:
+                b1._end_slot = handover_end
+                b1.end = slot_to_hhmm(handover_end)
+                b1.shift_hrs = (handover_end - b1._start_slot) * 0.5
+                b1.ca_note = _break_note(handover_end - b1._start_slot)
+
+
+# ── Advanced coach fixed schedule ─────────────────────────────────────────────
+
+def _ac_shifts(first_slot: int, last_slot: int, slot_to_hhmm) -> list[ShiftBlock]:
+    """
+    Two AC coach shifts covering [first_slot, last_slot] with 30-min handover.
+    Split at the window midpoint, aligned to the nearest 1-hour boundary.
+    """
+    window = last_slot + 1 - first_slot
+    mid = first_slot + window // 2
+    # Align to 1-hour boundary: keep same parity as first_slot so the
+    # boundary lands on a :00 or :30 mark consistently.
+    if (mid - first_slot) % 2 != 0:
+        mid += 1
+
+    # Shift 1: [first_slot, mid+1)  — extended 1 slot past midpoint for handover
+    s1_start, s1_end = first_slot, mid + 1
+    # Shift 2: [mid, last_slot+1)
+    s2_start, s2_end = mid, last_slot + 1
+
+    def _block(s, e):
+        return ShiftBlock(
+            role="Advanced Coach",
+            start=slot_to_hhmm(s),
+            end=slot_to_hhmm(e),
+            workers=1,
+            shift_hrs=(e - s) * 0.5,
+            ca_note=_break_note(e - s),
+            _start_slot=s,
+            _end_slot=e,
+        )
+
+    return [_block(s1_start, s1_end), _block(s2_start, s2_end)]
 
 
 # ── Main solver entry point ───────────────────────────────────────────────────
@@ -192,153 +239,122 @@ def solve_day_staffing(
     close_time: str,
     slots: list[Slot],
 ) -> DayStaffingResult:
-    """
-    Compute the minimum staffing plan for one operating day.
-
-    Approach:
-      1. Extract demand vectors (shore / reef / adv_coach / bay_coach) from slots.
-      2. Solve shore and reef coverage independently via shift-cover CP-SAT.
-      3. Determine how many reef workers need WSI cert to cover AC demand
-         without additional hires (dual-role optimisation).
-      4. Solve bay-coach coverage independently.
-      5. Post-process: CA break notes, headcount bounds, savings report.
-    """
-    base_slots = int(cfg.LG_BASE_SHIFT_HRS * 2)  # 4.5 h → 9 slots
-    max_slots  = int(cfg.LG_MAX_SHIFT_HRS  * 2)  # 8.5 h → 17 slots
+    max_slots = int(cfg.LG_MAX_SHIFT_HRS * 2)   # 7.5h → 15 slots
     T = len(slots)
+
+    def slot_to_hhmm(t: int) -> str:
+        return slots[t].wallclock if 0 <= t < T else close_time
 
     demand = _demand_vectors(slots)
 
-    def slot_to_hhmm(t: int) -> str:
-        return slots[t].wallclock if 0 <= t < T else slots[-1].wallclock
+    lg_slots = [t for t in range(T) if demand["shore"][t] + demand["reef"][t] > 0]
+    if not lg_slots:
+        return DayStaffingResult(
+            day=day, park_open_time=open_time, park_close_time=close_time,
+            lg_start_time=open_time, lg_end_time=close_time,
+            shifts=[], shore_total=0, reef_total=0, ac_total=0,
+            bay_coach_total=0, person_breakdown=[],
+            min_persons_all_pt=0, ft_eligible_workers=0, pt_only_workers=0,
+        )
+
+    first_lg, last_lg = lg_slots[0], lg_slots[-1]
+    lg_start_time = slot_to_hhmm(first_lg)
+    lg_end_time   = slot_to_hhmm(last_lg + 1)
 
     shifts_out: list[ShiftBlock] = []
 
-    # ── Shore coverage ────────────────────────────────────────────────────────
-    shore_wins = _shift_windows(demand["shore"], base_slots, max_slots)
+    # ── Shore ─────────────────────────────────────────────────────────────────
+    shore_wins = _shift_windows(demand["shore"], max_slots)
     shore_soln = _solve_cover(demand["shore"], shore_wins, "shore")
     shore_total = 0
     for (s, e), w in shore_soln.items():
-        length = e - s
         shifts_out.append(ShiftBlock(
-            role="Shore Guard",
-            start=slot_to_hhmm(s),
-            end=slot_to_hhmm(min(e, T - 1)),
-            workers=w,
-            shift_hrs=length * 0.5,
-            ca_note=_break_note(length),
+            role="Shore Guard", start=slot_to_hhmm(s), end=slot_to_hhmm(e),
+            workers=w, shift_hrs=(e - s) * 0.5, ca_note=_break_note(e - s),
+            _start_slot=s, _end_slot=e,
         ))
         shore_total += w
 
-    # ── Reef + dual-role (AC) coverage ───────────────────────────────────────
-    # Solve reef coverage ignoring AC to get the baseline reef assignment.
-    reef_wins = _shift_windows(demand["reef"], base_slots, max_slots)
+    # ── Reef ──────────────────────────────────────────────────────────────────
+    reef_wins = _shift_windows(demand["reef"], max_slots)
     reef_soln = _solve_cover(demand["reef"], reef_wins, "reef")
-
-    # Build a per-slot coverage map from the baseline reef solution so we can
-    # check whether existing reef workers already satisfy AC demand.
-    reef_coverage_at = [0] * T
-    for (s, e), w in reef_soln.items():
-        for t in range(s, e):
-            reef_coverage_at[t] += w
-
-    ac_peak = max(demand["adv_coach"]) if demand["adv_coach"] else 0
-
-    # For each slot with AC demand: can existing reef workers cover reef + AC?
-    # If reef_coverage_at[t] >= reef_demand[t] + ac_demand[t] for all t,
-    # then no extra hires are needed — we just need ac_peak of those reef
-    # workers to hold WSI certification (dual-role).
-    needs_extra_hire = any(
-        reef_coverage_at[t] < demand["reef"][t] + demand["adv_coach"][t]
-        for t in range(T)
-        if demand["adv_coach"][t] > 0
-    )
-
-    if needs_extra_hire:
-        # Solve again with the combined demand to find extra workers needed.
-        combined_demand = [
-            demand["reef"][t] + demand["adv_coach"][t] for t in range(T)
-        ]
-        combined_soln = _solve_cover(combined_demand, reef_wins, "reef_combined")
-        dual_role_cnt = sum(
-            combined_soln.get(w, 0) - reef_soln.get(w, 0)
-            for w in set(combined_soln) | set(reef_soln)
-        )
-        use_soln = combined_soln
-    else:
-        # Existing reef coverage suffices; number of those workers needing WSI
-        # equals the peak concurrent AC demand.
-        dual_role_cnt = ac_peak
-        use_soln = reef_soln
-
     reef_total = 0
-    for (s, e), w in use_soln.items():
-        length = e - s
+    for (s, e), w in reef_soln.items():
         shifts_out.append(ShiftBlock(
-            role="Reef Guard" + (" (incl. dual-role WSI)" if needs_extra_hire else ""),
-            start=slot_to_hhmm(s),
-            end=slot_to_hhmm(min(e, T - 1)),
-            workers=w,
-            shift_hrs=length * 0.5,
-            ca_note=_break_note(length),
+            role="Reef Guard", start=slot_to_hhmm(s), end=slot_to_hhmm(e),
+            workers=w, shift_hrs=(e - s) * 0.5, ca_note=_break_note(e - s),
+            _start_slot=s, _end_slot=e,
         ))
         reef_total += w
 
-    adv_coach_covered = ac_peak == 0 or not needs_extra_hire
+    # ── 30-min handover: enforce exactly shift_1.end = shift_2.start + 30 min
+    _apply_handover(shifts_out, slot_to_hhmm)
 
-    # ── Bay coach coverage ────────────────────────────────────────────────────
-    bay_wins  = _shift_windows(demand["bay_coach"], base_slots, max_slots)
-    bay_soln  = _solve_cover(demand["bay_coach"], bay_wins, "bay")
+    # ── Advanced Coach: 2 fixed shifts covering full LG window ────────────────
+    ac_shifts = _ac_shifts(first_lg, last_lg, slot_to_hhmm)
+    shifts_out.extend(ac_shifts)
+    ac_total = 2
+
+    # ── Bay coach ─────────────────────────────────────────────────────────────
+    bay_wins = _shift_windows(demand["bay_coach"], max_slots)
+    bay_soln = _solve_cover(demand["bay_coach"], bay_wins, "bay")
     bay_total = 0
     for (s, e), w in bay_soln.items():
-        length = e - s
         shifts_out.append(ShiftBlock(
-            role="Bay Coach",
-            start=slot_to_hhmm(s),
-            end=slot_to_hhmm(min(e, T - 1)),
-            workers=w,
-            shift_hrs=length * 0.5,
-            ca_note=_break_note(length),
+            role="Bay Coach", start=slot_to_hhmm(s), end=slot_to_hhmm(e),
+            workers=w, shift_hrs=(e - s) * 0.5, ca_note=_break_note(e - s),
+            _start_slot=s, _end_slot=e,
         ))
         bay_total += w
 
-    # ── Headcount bounds ──────────────────────────────────────────────────────
-    total_person_shifts = shore_total + reef_total + bay_total
-    min_persons_all_pt  = total_person_shifts   # one shift each
-    # FT workers can cover two adjacent shifts (≤ LG_MAX_SHIFT_HRS total).
-    # Rough estimate: half the workers could be FT covering two shifts.
-    min_persons_with_ft = math.ceil(total_person_shifts * 0.6)
+    # ── Person-type breakdown ─────────────────────────────────────────────────
+    ft_thresh = cfg.FT_SHIFT_THRESHOLD
+    breakdown: list[PersonTypeBreakdown] = []
+    for sb in shifts_out:
+        breakdown.append(PersonTypeBreakdown(
+            role=sb.role,
+            shift_start=sb.start,
+            shift_end=sb.end,
+            shift_hrs=sb.shift_hrs,
+            n_workers=sb.workers,
+            is_ft_eligible=sb.shift_hrs >= ft_thresh,
+        ))
+
+    total_workers = shore_total + reef_total + ac_total + bay_total
+    ft_workers    = sum(b.n_workers for b in breakdown if b.is_ft_eligible)
+    pt_workers    = total_workers - ft_workers
 
     # ── Notes ─────────────────────────────────────────────────────────────────
-    notes: list[str] = []
-    if dual_role_cnt > 0:
-        notes.append(
-            f"{dual_role_cnt} reef guard(s) per relevant shift must hold WSI "
-            f"certification to cover advanced coaching — no extra hire needed."
-        )
-    if bay_total > 0:
-        notes.append(
-            f"Bay coach slots can be filled by LGs with WSI if their LG shift "
-            f"and the lesson window overlap — reduces headcount further."
-        )
+    notes: list[str] = [
+        f"Park opens {open_time} · LG shifts start {lg_start_time} "
+        f"(30 min before first wave) · Waves end / LG shifts stop {lg_end_time} · "
+        f"Park closes {close_time}.",
+
+        "Consecutive same-role shifts share a 30-min handover: the outgoing "
+        "worker's shift ends 30 min after the incoming worker's shift starts.",
+
+        "2 Advanced Coach shifts are fixed and cover the full LG window. "
+        "Dual-role staff (reef-eligible + WSI) may fill an AC shift adjacent to "
+        "— never concurrent with — their LG shift, reducing unique-person count.",
+    ]
     for sb in shifts_out:
         if sb.ca_note:
             notes.append(f"{sb.role} {sb.start}–{sb.end}: {sb.ca_note}")
 
-    dual_role_saved = dual_role_cnt   # AC hires avoided
-
     return DayStaffingResult(
         day=day,
-        open_time=open_time,
-        close_time=close_time,
+        park_open_time=open_time,
+        park_close_time=close_time,
+        lg_start_time=lg_start_time,
+        lg_end_time=lg_end_time,
         shifts=sorted(shifts_out, key=lambda s: (s.role, s.start)),
         shore_total=shore_total,
         reef_total=reef_total,
-        dual_role_total=dual_role_cnt,
+        ac_total=ac_total,
         bay_coach_total=bay_total,
-        adv_coach_covered=adv_coach_covered,
-        min_persons_all_pt=min_persons_all_pt,
-        min_persons_with_ft=min_persons_with_ft,
-        dual_role_saved=dual_role_saved,
+        person_breakdown=breakdown,
+        min_persons_all_pt=total_workers,
+        ft_eligible_workers=ft_workers,
+        pt_only_workers=pt_workers,
         notes=notes,
     )

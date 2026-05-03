@@ -72,20 +72,31 @@ def build_rotation(
     "HH:MM" strings sourced from the input xlsx (see load_open_window).
     ``program`` is the per-hour wave map for the same day-column.
 
-    Operating-window rules (parameters/operational_overview.txt §13–14):
+    Operating-window rules:
       first_wave = open_time + 60 min
-      last_wave  = close_time - 60 min  (last wave's hour starts 1h before close)
-      operational window = [first_wave, last_wave + 60min)
+      last_wave  = last program hour with non-null reef or bay wave content
+      operational window = [first_wave, last_wave + 60 min)
       PREP slots       = [open_time, first_wave)
-      POST_CLOSE slots = [last_wave + 60min, close_time)
+      POST_CLOSE slots = [last_wave + 60 min, close_time)
     """
     open_min  = _hhmm_to_min(open_time)
     close_min = _hhmm_to_min(close_time)
     if close_min <= open_min:
         raise ValueError(f"close_time {close_time} must be after open_time {open_time}")
     first_wave_min = open_min + 60
-    last_wave_min  = close_min - 60          # last wave's HOUR starts here
-    op_end_min     = last_wave_min + 60      # operating ends 60 min after last wave starts
+
+    # Operational window ends when the last wave with actual content finishes.
+    # This avoids extending guard shifts into post-wave slots that appear in the
+    # program with null wave types (the xlsx schedule runs to midnight).
+    wave_hours_with_content = [
+        h for h, p in program.items()
+        if p.reef_wave is not None or p.bay_wave is not None
+    ]
+    if wave_hours_with_content:
+        last_wave_min = max(wave_hours_with_content) * 60
+        op_end_min    = last_wave_min + 60   # wave lasts 1 hour
+    else:
+        op_end_min = close_min
 
     layout = staff_layout()
 

@@ -18,6 +18,7 @@ WAVE_INPUT_XLSX  = "parameters/spec_surf_park_roster_v0.xlsx"
 WAVE_INPUT_SHEET = "OPENING SCHEDULE FINAL 1.0"
 ROTATION_XLSX    = "outputs/rotation_v0.xlsx"
 STAFFING_XLSX    = "outputs/staffing_v0.xlsx"
+ROSTER_XLSX      = "outputs/roster_v0.xlsx"
 
 # ── Rotation order ────────────────────────────────────────────────────────────
 # Per parameters/lifeguard_rules.txt §3 and §5.
@@ -35,11 +36,9 @@ PROGRESSIVE_REEF_WAVES = frozenset({"Malibu", "Progressive Turns"})
 BEGINNER_BAY_LABEL     = "Beginner Lesson"
 
 # ── Shift structure ───────────────────────────────────────────────────────────
-# Per parameters/lifeguard_rules.txt §12-13:
-#   base 4.5 h shifts; mid-shifts extended before opening/closing shifts.
-LG_BASE_SHIFT_HRS = 4.5    # minimum shift length (lifeguard)
-LG_MAX_SHIFT_HRS  = 8.5    # absolute upper bound for a single shift
-SHIFT_OVERLAP_MIN = 30     # incoming shift arrives 30 min before prior shift ends
+LG_MAX_SHIFT_HRS   = 7.5   # actual working time per shift (excl. unpaid meal)
+SHIFT_OVERLAP_MIN  = 30    # handover: outgoing shift stays 30 min into next shift
+FT_SHIFT_THRESHOLD = 6.0   # shifts >= this many hours are classified FT-eligible
 
 # ── California labor law break rules ─────────────────────────────────────────
 # Per parameters/california_labor_laws.txt.

@@ -19,7 +19,7 @@ from roster.rotation import build_rotation
 from roster.wave_input import load_wave_program, load_open_window
 from roster.render import render_xlsx
 from solver.staffing import solve_day_staffing
-from solver.render_staffing import render_staffing_xlsx
+from solver.render_staffing import render_staffing_xlsx, render_roster_xlsx
 
 
 def main(argv: list[str]) -> int:
@@ -53,12 +53,13 @@ def main(argv: list[str]) -> int:
         # ── Layer 2: staffing ─────────────────────────────────────────────────
         result = solve_day_staffing(day, open_t, close_t, slots)
         staffing_results.append(result)
-        dual_note = f"dual_role={result.dual_role_total}(WSI)  " if result.dual_role_total else ""
         print(
-            f"  {'':10s}  shore={result.shore_total}  reef={result.reef_total}  "
-            f"{dual_note}bay_coach={result.bay_coach_total}"
-            f"  min_persons={result.min_persons_all_pt} (PT) "
-            f"/ {result.min_persons_with_ft} (FT mix)"
+            f"  {'':10s}  shore={result.shore_total}  reef={result.reef_total}"
+            f"  ac={result.ac_total}  bay={result.bay_coach_total}"
+            f"  total={result.min_persons_all_pt}"
+            f"  (FT-eligible={result.ft_eligible_workers}"
+            f"  PT={result.pt_only_workers})"
+            f"  lg={result.lg_start_time}–{result.lg_end_time}"
         )
 
     if not rotation_by_day:
@@ -72,6 +73,10 @@ def main(argv: list[str]) -> int:
     # ── Write staffing xlsx ───────────────────────────────────────────────────
     stf_out = render_staffing_xlsx(staffing_results, cfg.STAFFING_XLSX)
     print(f"Staffing → {stf_out}  ({len(staffing_results)} days + weekly summary)")
+
+    # ── Write roster xlsx ─────────────────────────────────────────────────────
+    rst_out = render_roster_xlsx(staffing_results, rotation_by_day, cfg.ROSTER_XLSX)
+    print(f"Roster   → {rst_out}  (shift templates + {len(staffing_results)} day sheets)")
 
     return 0
 
