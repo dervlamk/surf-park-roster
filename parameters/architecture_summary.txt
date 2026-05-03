@@ -1,0 +1,172 @@
+DSRT Surf Park Roster — Architecture & Consolidation Summary
+=============================================================
+Generated: 2026-05-03
+
+
+CURRENT STATE
+-------------
+
+Config files
+  config.py      — OLD. Uses named day-keys (mon_thu / friday / saturday / sunday).
+                   Contains HOURS, SHIFTS, BREAK_RULES, ROTATION_SEQ, HEADCOUNT, PAY.
+                   Entirely superseded by config_v2.py + xlsx-based day windows.
+                   → DELETE. Absorb BREAK_RULES into config_v2.py.
+
+  config_v2.py   — NEW. Clean. Has DAYS list, file paths, rotation order,
+                   pool sizes, wave-type → coach mapping.
+                   → KEEP. Add BREAK_RULES + HIRING_RULES sections.
+
+Parameter files (parameters/)
+  lifeguard_rules.txt      — Human-readable source of truth for LG rotation,
+                             shift rules, floater counts. Keep as reference.
+                             Machine-readable counterparts already in config_v2.py;
+                             add LG_BASE_SHIFT_HRS = 4.5.
+
+  hiring_guidelines.txt    — Prose preference for PT-first, FT possible after
+                             90 days/30h threshold, coach relocation constraints.
+                             → Encode PREFER_PT, FT_HOURS_TRIGGER, COACH_MIN_HOURS
+                               in config_v2.py.
+
+  california_labor_laws.txt — Prose version of break rules. Keep as reference.
+                              → Encode as BREAK_RULES dict in config_v2.py.
+
+  wave_type_rules.txt      — Wave categories and lesson rules. Keep as reference.
+                             PROGRESSIVE_REEF_WAVES / BEGINNER_BAY_LABEL already
+                             in config_v2.py.
+
+  spec_surf_park_roster_v0.xlsx — Primary data input; stay as-is.
+
+cpsat/ module
+  cpsat/wave_data.py   — Wave calendar hard-coded in Python.
+                         SUPERSEDED by roster/wave_input.py (reads from xlsx).
+                         → ARCHIVE / DELETE.
+
+  cpsat/staff_data.py  — Person dataclass + 28-person ROSTER.
+                         KEEP structure; update available_day_keys → available_days
+                         (Monday..Sunday strings), move to solver/staff.py.
+
+  cpsat/dsrt_solver.py — CP-SAT model tied to named day-key system and fixed
+                         28-person roster. Hard to extend.
+                         → RETIRE. Replace with solver/staffing.py (see below).
+
+  cpsat/verifier.py    — Pure-Python post-solve audit of all constraints.
+                         Most valuable piece in cpsat/. Only minor surgery needed
+                         to consume new formats.
+                         → ADAPT into solver/verifier.py.
+
+roster/ module — Layer 1: DEMAND schedule (keep all, no changes needed)
+  wave_input.py    — Loads wave program from xlsx.
+  rotation.py      — Builds anonymous role-slot demand per 30-min slot.
+  render.py        — Writes xlsx. Extend to add staffing summary sheet.
+  __main__.py      — CLI. Extend to call staffing solver.
+
+
+TWO-LAYER ARCHITECTURE
+----------------------
+
+  Layer 1 — DEMAND (built)
+    roster/wave_input.py + rotation.py
+    → Produces list[Slot] where each slot has anonymous role IDs
+      (SG1, RG3, BC2) mapped to station labels.
+      These are WHAT needs to happen, not WHO does it.
+
+  Layer 2 — SUPPLY (to build in solver/)
+    solver/staff.py    — Person dataclass + configurable roster.
+    solver/staffing.py — CP-SAT shift-cover model.
+                         Input:  list[Slot] from Layer 1.
+                         Output: minimum shift assignments + headcount
+                                 per role type per day.
+    solver/verifier.py — Adapted from cpsat/verifier.py; audits assignments
+                         against CA law and cert requirements.
+
+
+STAFFING MODEL DESIGN
+---------------------
+
+Person model (solver/staff.py)
+  Key flags:
+    reef_eligible    — surf certification; can work reef stations (RG/RF)
+    coach_eligible   — WSI certification; can teach lessons (AC/BC slots)
+  A person with BOTH flags is the "dual-role" employee: covers reef LG
+  duties AND advanced coaching slots without an extra hire.
+
+  Contract types: FT | PT | CASUAL
+    PT:     < 40 h/week (preferred per hiring_guidelines.txt §1)
+    FT:     triggered after 90 consecutive days at 30+ h/week (CA law §8)
+    CASUAL: on-call, no minimum
+
+Shift structure (per lifeguard_rules.txt §12-13)
+  Base shift:    4.5 h (9 × 30-min slots)
+  Extended:      up to 8.5 h (17 slots) for longer days
+  Rule §13:      extend mid-shifts BEFORE extending opening/closing shifts
+  CA meal break: any shift > 5 h gets one 30-min unpaid lunch
+  CA rest break: one 10-min paid break per 3.5 h worked
+
+Shift-cover CP-SAT model (solver/staffing.py)
+  For each role type (shore, reef, adv_coach, bay_coach):
+    - Compute demand[t] = concurrent workers of this type needed at slot t
+    - Generate feasible shift windows (start, end) aligned to hour boundaries
+    - Decision: n_workers[window] ∈ {0..10} integer
+    - Constraint: for each t, sum(n_workers[w] covering t) >= demand[t]
+    - Objective: minimize sum(n_workers) across all windows and types
+
+  Dual-role optimization:
+    Reef workers with coach_eligible can satisfy both reef AND adv_coach demand
+    simultaneously — no separate hire needed for progressive wave coaching.
+    Model via separate variables: reef_dual[w] (reef_eligible + coach_eligible)
+    and reef_only[w]. Constraints:
+      reef_dual + reef_only >= reef_demand[t]
+      reef_dual             >= adv_coach_demand[t]
+
+  Bay-coach-from-LG optimization:
+    Bay coach slots (BC*) require WSI cert but NOT surf cert.
+    LGs (shore or reef) who hold WSI can fill BC slots during lesson windows.
+    On long operating days, a single LG with WSI who spends 2.5 h on a
+    bay lesson instead of an LG rotation slot can eliminate a separate
+    coach hire. Model as a constraint-relaxation option flagged in output.
+
+Weekly solve strategy (avoids the joint-model timeout)
+  Solve each day independently (fast, 90-150 s each).
+  Sum each person's daily hours across the week post-solve.
+  Flag anyone crossing the 30 h/week FT trigger (CA law).
+  No joint CP-SAT model needed — weekly hour checks are a post-step.
+
+Headcount output (per day)
+  For each role type and shift window, report:
+    - n_workers: minimum concurrent workers in that window
+    - shift_hours: length of window
+    - ca_break_required: bool (shift > 5 h)
+  Totals:
+    - total_person_shifts: sum of all n_workers across windows
+    - min_unique_persons (all PT, one shift each) = total_person_shifts
+    - min_unique_persons (some FT, two adjacent shifts) < total_person_shifts
+    - dual_role_savings: adv_coach slots coverable by existing reef guards
+    - bay_coach_savings: BC slots coverable by LGs with WSI
+
+
+RECOMMENDED FILE STRUCTURE (post-cleanup)
+------------------------------------------
+
+  config_v2.py              ← single config; absorbs BREAK_RULES + HIRING_RULES
+  parameters/               ← prose reference only
+    *.txt, *.xlsx
+
+  roster/                   ← Layer 1: demand schedule (unchanged)
+    wave_input.py
+    rotation.py
+    render.py               ← extend to add staffing summary sheet
+    __main__.py             ← extend to call Layer 2
+
+  solver/                   ← Layer 2: new
+    __init__.py
+    staff.py                ← Person dataclass + default roster
+    staffing.py             ← CP-SAT shift-cover solver
+    verifier.py             ← adapted from cpsat/verifier.py
+
+  cpsat/                    ← archive; do not import from new code
+    (all files retained for reference; dsrt_solver.py and wave_data.py
+     no longer imported by any active module)
+
+  outputs/
+    rotation_v0.xlsx        ← Layer 1 output (duty rotation per day)
+    staffing_v0.xlsx        ← Layer 2 output (headcount + shift plan per day)

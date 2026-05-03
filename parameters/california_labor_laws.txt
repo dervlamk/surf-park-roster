@@ -5,4 +5,5 @@ California Labor Law
  4. A break cannot be added onto a lunch break 
  5. A break cannot be used to go home early
  6. A 6 hour shift can have a meal waiver, but I want to avoid this strategy, but have it noted.
-
+ 7. Part time is less than 40 hours/week
+ 8. But, if someone works for 90 days consecutively at more than 30 hours/week, they must be given “full time” status
