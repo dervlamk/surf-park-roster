@@ -1,0 +1,16 @@
+name: dsrt_roster
+
+channels:
+  - conda-forge
+
+# Python pulls Python + pip from conda-forge.
+# Domain libraries (openpyxl, ortools) are installed via pip — ortools has
+# better wheel support than conda-forge for this project's Python version.
+dependencies:
+  - python=3.11
+  - pip
+
+  - pip:
+      - openpyxl==3.1.5
+      - et_xmlfile==2.0.0
+      - ortools==9.15.6755

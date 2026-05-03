@@ -1,0 +1,20 @@
+ 1. The wave pool has two sides: left lagoon and right lagoon.
+ 2. The lagoons always have the same wave type
+ 3. Each lagoon side has a Reef Wave where the waves are bigger and more advanced.
+ 4. Each lagoon side has a Bay Wave where a smaller wave reforms and is used for teaching surfing or playing
+ 5. Bay Wave products:
+    a.	Whitewater Bay Swim and Boogie – this can only run on Reef Intermediate Challenger and above as the Bay wave is closed
+    b.	Ocean Swim & Boogie – this can only run on Reef  Intermediate Turns + wave setting and below
+    c.	Whitewater Bay Surf – this can run on any Reef wave setting
+    d.	Free Bay Surf - this can only run on Reef  Intermediate Turns + wave setting and below
+    e.	Beginner Group Lesson - this can only run on Reef  Intermediate Turns + wave setting and below
+    f.	Novice Group Lesson - this can only run on Reef  Intermediate Turns + wave setting and below
+ 6. Beginner lessons and Beginner Free Play can only operate on Reef settings of Malibu, Progressive turns, Intermediate turns, and Intermediate Turns +. All other settings are too advanced.
+ 7. All wave type settings can have Swim and Play and Boogie in the Bay
+ 8. The Bay is split into 3 sections: Speedies, Centers, Wall
+    9. Speedies is where a Beginner lesson takes place and Beginner Free Play
+    10. Centers and Wall is where Swim and Play and Boogie in the Bay occur. Both can occur at the same time.
+    11. If Beginner Free Play is programmed, only 1 of Swim and Play or Boogie in the Bay can run on the Wall section
+12. Waves start on the hour every hour when open
+13. Opening of the venue is 1 hour prior to when waves start
+14. Closing of the venue is 30 minutes after the last wave
